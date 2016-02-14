@@ -3,8 +3,15 @@ open Lwt
 let strf = Fmt.strf
 let failwiths fmt = Fmt.kstrf failwith fmt
 
-let timeout ~time f =
-  (f >|= (fun x -> `Ok x)) <?> (Lwt_unix.sleep time >|= fun () -> `Timeout)
+module Fs = struct
+
+  let exists path =
+    let open Unix in
+    try (stat path |> ignore; true) with Unix_error (ENOENT, _, _) -> false
+
+  let required path =
+    if not (exists path) then failwiths "File not found: " path
+end
 
 module POBox = struct
 
@@ -23,14 +30,17 @@ end
 
 (** context **)
 
-let helper = "./shim2.so"
+let helper =
+  Pctrl_prefix_gen.prefix
+    ^ "/lib/stublibs/dllinstrumentation_stubs.so"
+
+let () = Fs.required helper
 
 type ctx = {
   efd        : Unix.file_descr
 ; sigin      : int
 ; sigout     : int
 ; post       : (int, int) POBox.t
-; helper     : string
 ; timeout    : float
 ; env        : (string * string) list
 ; mutable id : int
@@ -46,8 +56,7 @@ let rec receive fd buf p =
     else Fmt.pr "* Ack %d was not expected. Something's racy...\n%!" cookie ;
     receive fd buf p
 
-let create ?(helper=helper)
-           ?(timeout=5.)
+let create ?(timeout=5.)
            ?(env=[])
            ?(sigout=Signal_fd.sigrtmin)
            ?(sigin=Signal_fd.sigrtmin + 1) () =
@@ -57,7 +66,7 @@ let create ?(helper=helper)
   async (fun () ->
     receive (Lwt_unix.of_unix_file_descr efd)
             (Bytes.create Siginfo_t.size) post) ;
-  { efd; sigin; sigout; post; helper; timeout; env; id = 1 }
+  { efd; sigin; sigout; post; timeout; env; id = 1 }
 
 let destroy ctx =
   Signal_fd.sigprocmask `Unblock [ctx.sigin] |> ignore ;
@@ -87,32 +96,26 @@ let itsdead pid fmt =
   postmortem pid >>= fun status ->
     Printf.ksprintf (fun msg -> fail (Dead (pid, msg, status))) fmt
 
-let exists path =
-  let open Unix in
-  try (stat path |> ignore; true) with Unix_error (ENOENT, _, _) -> false
-
-let ensure_file path =
-  if not (exists path) then failwiths "Non-existent executable: " path
-
-let environment ?(extra=[]) instrument helper =
+let environment ?(extra=[]) instrument =
   let a1 =
-    if instrument then
-      ( ensure_file helper; [| strf "LD_PRELOAD=%s" helper |] )
-    else [| |]
+    if instrument then [| strf "LD_PRELOAD=%s" helper |] else [| |]
   and a2 =
     extra |> List.map (fun (k, v) -> strf "%s=%s" k v)
           |> Array.of_list in
   Array.(append (append a1 a2) (Unix.environment ()))
 
 let start ?(instrument=true) ctx exe args =
-  ensure_file exe ;
-  let env  = environment ~extra:ctx.env instrument ctx.helper
+  Fs.required exe;
+  let env  = environment ~extra:ctx.env instrument
   and args = Array.of_list (exe::args) in
   match Unix.fork () with
   | 0   -> Unix.execve exe args env
   | pid -> Lwt_unix.sleep 0.1 >|= fun () -> of_pid pid
 
 let new_cookie ({ id } as ctx) = ctx.id <- id + 1; id
+
+let timeout ~time f =
+  (f >|= (fun x -> `Ok x)) <?> (Lwt_unix.sleep time >|= fun () -> `Timeout)
 
 let clone ctx ({ pid } as t) =
   Lwt_mutex.with_lock t.mutex @@ fun () ->

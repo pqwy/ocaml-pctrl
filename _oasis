@@ -1,0 +1,22 @@
+OASISFormat:   0.4
+Name:          pctrl
+Version:       0.0.1
+Synopsis:      PCTRL.
+Authors:       XXX
+License:       BSD-2-clause
+Plugins:       META (0.4), DevFiles (0.4)
+BuildTools:    ocamlbuild
+OCamlVersion:  >= 4.02.0
+PostConfCommand: ./postconf
+
+Library "pctrl"
+  Path:            pctrl/
+  InternalModules: Pctrl_prefix_gen
+  Modules:         Pctrl
+  BuildDepends:    unix, signalfd, fmt, lwt, lwt.unix, lwt.ppx
+
+Library "instrumentation"
+  Findlibparent: pctrl
+  Path:          instrumentation/
+  CSources:      instrumentation/probe.c
+  CCOpt:         -O3

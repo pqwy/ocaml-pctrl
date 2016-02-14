@@ -4,7 +4,6 @@ type t
 exception Dead of int * string * string
 
 val create :
-  ?helper:string ->
   ?timeout:float ->
   ?env:(string * string) list ->
   ?sigout:int ->

@@ -1,0 +1,21 @@
+# OASIS_START
+# DO NOT EDIT (digest: c1c7c021d5695004381ff81ad670af16)
+version = "0.0.1"
+description = "PCTRL."
+requires = "unix signalfd fmt lwt lwt.unix lwt.ppx"
+archive(byte) = "pctrl.cma"
+archive(byte, plugin) = "pctrl.cma"
+archive(native) = "pctrl.cmxa"
+archive(native, plugin) = "pctrl.cmxs"
+exists_if = "pctrl.cma"
+package "instrumentation" (
+ version = "0.0.1"
+ description = "PCTRL."
+ archive(byte) = "instrumentation.cma"
+ archive(byte, plugin) = "instrumentation.cma"
+ archive(native) = "instrumentation.cmxa"
+ archive(native, plugin) = "instrumentation.cmxs"
+ exists_if = "instrumentation.cma"
+)
+# OASIS_STOP
+

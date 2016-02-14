@@ -1,0 +1,9 @@
+#!/bin/bash
+
+pfile="pctrl/pctrl_prefix_gen.ml"
+
+eval "$(< setup.data)"
+
+cat > ${pfile} <<EOF
+let prefix = "${prefix}"
+EOF

@@ -1,0 +1,30 @@
+# OASIS_START
+# DO NOT EDIT (digest: 6c8b3e28fe45a9fd455ebff451f5a7d4)
+# Ignore VCS directories, you can use the same kind of rule outside
+# OASIS_START/STOP if you want to exclude directories that contains
+# useless stuff for the build process
+true: annot, bin_annot
+<**/.svn>: -traverse
+<**/.svn>: not_hygienic
+".bzr": -traverse
+".bzr": not_hygienic
+".hg": -traverse
+".hg": not_hygienic
+".git": -traverse
+".git": not_hygienic
+"_darcs": -traverse
+"_darcs": not_hygienic
+# Library pctrl
+"pctrl/pctrl.cmxs": use_pctrl
+<pctrl/*.ml{,i,y}>: package(fmt)
+<pctrl/*.ml{,i,y}>: package(lwt)
+<pctrl/*.ml{,i,y}>: package(lwt.ppx)
+<pctrl/*.ml{,i,y}>: package(lwt.unix)
+<pctrl/*.ml{,i,y}>: package(signalfd)
+<pctrl/*.ml{,i,y}>: package(unix)
+# Library instrumentation
+"instrumentation/instrumentation.cmxs": use_instrumentation
+<instrumentation/*.ml{,i,y}>: oasis_library_instrumentation_ccopt
+"instrumentation/instrumentation/probe.c": oasis_library_instrumentation_ccopt
+<instrumentation/instrumentation.{cma,cmxa}>: use_libinstrumentation_stubs
+# OASIS_STOP
