@@ -13,6 +13,11 @@ module Fs = struct
     if not (exists path) then failwiths "File not found: " path
 end
 
+let with_open_file path flags perm k =
+  let open Lwt_unix in
+  openfile path flags perm >>= fun fd ->
+    k fd >>= fun res -> close fd >|= fun () -> res
+
 module POBox = struct
 
   type ('a, 'b) t = ('a, 'b Lwt.u) Hashtbl.t
@@ -30,11 +35,9 @@ end
 
 (** context **)
 
-let helper =
+let shim =
   Pctrl_prefix_gen.prefix
     ^ "/lib/stublibs/dllinstrumentation_stubs.so"
-
-let () = Fs.required helper
 
 type ctx = {
   efd        : Unix.file_descr
@@ -60,6 +63,7 @@ let create ?(timeout=5.)
            ?(env=[])
            ?(sigout=Signal_fd.sigrtmin)
            ?(sigin=Signal_fd.sigrtmin + 1) () =
+  Fs.required shim;
   Signal_fd.sigprocmask `Block [sigin] |> ignore ;
   let efd  = Signal_fd.signalfd ~cloexec:true [sigin]
   and post = POBox.create () in
@@ -75,30 +79,39 @@ let destroy ctx =
 
 (** process **)
 
-type t = { pid : int ; mutex : Lwt_mutex.t }
+type t = { pid : int ; ctx : ctx ; mutex : Lwt_mutex.t }
 
-let pid { pid } = pid
-
-let of_pid pid = { pid ; mutex = Lwt_mutex.create () }
-
-let postmortem pid =
-  let open Lwt_unix in
-  let rec go buf =
-    try%lwt
-      openfile (strf "/proc/%d/stat" pid) [O_RDONLY] 0 >>= fun fd ->
-        read fd buf 0 1024 >|= Bytes.sub buf 0
-    with Unix.Unix_error (Unix.ENOENT, _, _) -> return "<GONE>"
-  in go (Bytes.create 1024)
+type stat = string * char
 
 exception Dead of int * string * string
 
-let itsdead pid fmt =
-  postmortem pid >>= fun status ->
-    Printf.ksprintf (fun msg -> fail (Dead (pid, msg, status))) fmt
+let serially t = Lwt_mutex.with_lock t.mutex
+
+let pid { pid } = pid
+
+let of_pid ~ctx pid = { pid ; ctx ; mutex = Lwt_mutex.create () }
+
+let p_stat pid =
+  let parse s =
+    Scanf.sscanf s "%d %s %c" (fun _ comm state -> (comm, state))
+  and fp  = strf "/proc/%d/stat" pid
+  and buf = Bytes.create 256 in
+  let open Lwt_unix in try%lwt
+    with_open_file fp [O_RDONLY] 0 @@ fun fd ->
+      read fd buf 0 256 >|= fun _ -> Some (parse buf)
+  with Unix.Unix_error (Unix.ENOENT, _, _) -> return_none
+
+let pp_stat =
+  Fmt.(option ~none:(const string "<GONE>") (Dump.pair string char))
+
+let itsdead { pid } fmt =
+  let k msg = p_stat pid >>= fun s ->
+    fail (Dead (pid, msg, Fmt.strf "%a" pp_stat s)) in
+  Fmt.kstrf k fmt
 
 let environment ?(extra=[]) instrument =
   let a1 =
-    if instrument then [| strf "LD_PRELOAD=%s" helper |] else [| |]
+    if instrument then [| strf "LD_PRELOAD=%s" shim |] else [| |]
   and a2 =
     extra |> List.map (fun (k, v) -> strf "%s=%s" k v)
           |> Array.of_list in
@@ -108,43 +121,54 @@ let start ?(instrument=true) ctx exe args =
   Fs.required exe;
   let env  = environment ~extra:ctx.env instrument
   and args = Array.of_list (exe::args) in
-  match Unix.fork () with
+  let open Unix in match fork () with
   | 0   -> Unix.execve exe args env
-  | pid -> Lwt_unix.sleep 0.1 >|= fun () -> of_pid pid
+  | pid -> Lwt_unix.sleep 0.1 >|= fun () -> of_pid ~ctx pid
+  | exception Unix_error (EAGAIN, _, _) ->
+      failwiths "Pctrl.start: failed to fork: EAGAIN"
 
 let new_cookie ({ id } as ctx) = ctx.id <- id + 1; id
 
 let timeout ~time f =
   (f >|= (fun x -> `Ok x)) <?> (Lwt_unix.sleep time >|= fun () -> `Timeout)
 
-let clone ctx ({ pid } as t) =
-  Lwt_mutex.with_lock t.mutex @@ fun () ->
+let clone ({ pid; ctx } as t) =
+  serially t @@ fun () ->
     let cookie = new_cookie ctx in
-    let th = POBox.waitfor ctx.post cookie >|= of_pid in
+    let th = POBox.waitfor ctx.post cookie >|= of_pid ~ctx in
     let rec wkup = function
-      (* | 0 -> itsdead t.pid "Clone timeout (cookie %d)" cookie *)
-      | 0 -> itsdead t.pid "Clone timeout."
+      | 0 -> itsdead t "Clone timeout (cookie %d)" cookie
       | n ->
           Unix.kill t.pid Sys.sigcont;
-          timeout ~time:0.5 th >>= function
+          timeout ~time:0.01 th >>= function
             | `Ok x    -> return x
             | `Timeout -> wkup (pred n) in
     try%lwt
       Signal_fd.sigqueue ~pid ~sgn:ctx.sigout ~value:cookie;
-      wkup (int_of_float (ctx.timeout /. 0.5))
-    with Unix.Unix_error (Unix.ESRCH, _, _) -> itsdead t.pid "Clone ESRCH"
+      wkup (int_of_float (ctx.timeout /. 0.01))
+    with Unix.Unix_error (Unix.ESRCH, _, _) -> itsdead t "Clone ESRCH"
 
 let terminate t =
-  let open Unix in
-  try
-    kill t.pid Sys.sigterm;
-    kill t.pid Sys.sigcont
-  with Unix_error (ESRCH, _, _) -> ()
+  let send () =
+    let open Unix in try
+      kill t.pid Sys.sigterm;
+      kill t.pid Sys.sigcont
+    with Unix_error (ESRCH, _, _) -> () in
+  serially t @@ fun () -> send () |> return
 
-(* XXX *)
-let signal ({ pid } as t) sign =
-  Lwt_mutex.with_lock t.mutex @@ fun () ->
-    Unix.kill pid sign; Lwt_unix.sleep 0.01
+let signal ({ pid; ctx } as t) sign p =
+  let kill () = Unix.(
+    try kill pid sign |> return with
+      Unix_error (ESRCH, _, _) -> itsdead t "Trying to send signal."
+  ) in
+  let rec go = function
+    | 0 -> itsdead t "Waiting for signal to cause state transition"
+    | n ->
+        kill () >>= fun () -> p_stat pid >>= function
+          | None -> itsdead t "Trying to send signal."
+          | Some (_, s) when p s -> return_unit
+          | Some _ -> Lwt_unix.sleep 0.01 >>= fun () -> go (pred n) in
+  serially t @@ fun () -> go (int_of_float (ctx.timeout /. 0.01))
 
-let freeze t = signal t Sys.sigstop
-let unfreeze t = signal t Sys.sigcont
+let freeze t = signal t Sys.sigstop (fun s -> s = 'T')
+let unfreeze t = signal t Sys.sigcont (fun s -> s <> 'T')

@@ -9,14 +9,35 @@ BuildTools:    ocamlbuild
 OCamlVersion:  >= 4.02.0
 PostConfCommand: ./postconf
 
-Library "pctrl"
-  Path:            pctrl/
+
+Flag demo1
+  Description: demo1
+  Default:     false
+
+
+Library pctrl
+  Path:            pctrl
   InternalModules: Pctrl_prefix_gen
   Modules:         Pctrl
   BuildDepends:    unix, signalfd, fmt, lwt, lwt.unix, lwt.ppx
 
-Library "instrumentation"
+Library instrumentation
   Findlibparent: pctrl
-  Path:          instrumentation/
+  Path:          instrumentation
   CSources:      instrumentation/probe.c
   CCOpt:         -O3
+
+
+Executable demo1slave
+  Path:           demo1
+  Install:        false
+  CompiledObject: best
+  MainIs:         demo1slave.ml
+  BuildDepends:   fmt,lwt.unix 
+
+Executable demo1master
+  Path:           demo1
+  Install:        false
+  CompiledObject: best
+  MainIs:         demo1master.ml
+  BuildDepends:   pctrl,fmt,lwt.unix 

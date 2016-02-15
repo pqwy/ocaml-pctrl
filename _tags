@@ -1,5 +1,5 @@
 # OASIS_START
-# DO NOT EDIT (digest: 6c8b3e28fe45a9fd455ebff451f5a7d4)
+# DO NOT EDIT (digest: 8551d3d291c9aca12fad667611d325e8)
 # Ignore VCS directories, you can use the same kind of rule outside
 # OASIS_START/STOP if you want to exclude directories that contains
 # useless stuff for the build process
@@ -27,4 +27,22 @@ true: annot, bin_annot
 <instrumentation/*.ml{,i,y}>: oasis_library_instrumentation_ccopt
 "instrumentation/instrumentation/probe.c": oasis_library_instrumentation_ccopt
 <instrumentation/instrumentation.{cma,cmxa}>: use_libinstrumentation_stubs
+# Executable demo1slave
+<demo1/demo1slave.{native,byte}>: package(fmt)
+<demo1/demo1slave.{native,byte}>: package(lwt.unix)
+# Executable demo1master
+<demo1/demo1master.{native,byte}>: package(fmt)
+<demo1/demo1master.{native,byte}>: package(lwt)
+<demo1/demo1master.{native,byte}>: package(lwt.ppx)
+<demo1/demo1master.{native,byte}>: package(lwt.unix)
+<demo1/demo1master.{native,byte}>: package(signalfd)
+<demo1/demo1master.{native,byte}>: package(unix)
+<demo1/demo1master.{native,byte}>: use_pctrl
+<demo1/*.ml{,i,y}>: package(fmt)
+<demo1/*.ml{,i,y}>: package(lwt)
+<demo1/*.ml{,i,y}>: package(lwt.ppx)
+<demo1/*.ml{,i,y}>: package(lwt.unix)
+<demo1/*.ml{,i,y}>: package(signalfd)
+<demo1/*.ml{,i,y}>: package(unix)
+<demo1/*.ml{,i,y}>: use_pctrl
 # OASIS_STOP

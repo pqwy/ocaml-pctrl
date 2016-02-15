@@ -1,5 +1,5 @@
 (* OASIS_START *)
-(* DO NOT EDIT (digest: 3df43bea206a2c433db612baf8dc5f25) *)
+(* DO NOT EDIT (digest: ee45a270c2993654b7fc31fcb6d3309f) *)
 module OASISGettext = struct
 (* # 22 "src/oasis/OASISGettext.ml" *)
 
@@ -612,13 +612,13 @@ let package_default =
           ("pctrl", ["pctrl"], []);
           ("instrumentation", ["instrumentation"], [])
        ];
-     lib_c = [("instrumentation", "instrumentation/", [])];
+     lib_c = [("instrumentation", "instrumentation", [])];
      flags =
        [
           (["oasis_library_instrumentation_ccopt"; "compile"],
             [(OASISExpr.EBool true, S [A "-ccopt"; A "-O3"])])
        ];
-     includes = []
+     includes = [("demo1", ["pctrl"])]
   }
   ;;
 

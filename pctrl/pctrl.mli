@@ -1,6 +1,7 @@
 type ctx
 type t
 
+type stat = string * char
 exception Dead of int * string * string
 
 val create :
@@ -13,10 +14,10 @@ val create :
 
 val destroy : ctx -> unit
 
-val pid : t -> int
 val start : ?instrument:bool -> ctx -> string -> string list -> t Lwt.t
-val clone : ctx -> t -> t Lwt.t
-val terminate : t -> unit
+val pid       : t -> int
+val clone     : t -> t Lwt.t
+val terminate : t -> unit Lwt.t
 
 val freeze   : t -> unit Lwt.t
 val unfreeze : t -> unit Lwt.t
