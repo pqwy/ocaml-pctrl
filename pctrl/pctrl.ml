@@ -1,7 +1,33 @@
 open Lwt
 
-let strf = Fmt.strf
+let env_data = "NQSB_DATA"
+let env_ctrl = "NQSB_CONTROL"
+
 let failwiths fmt = Fmt.kstrf failwith fmt
+
+let result th =
+  try%lwt th >|= fun x -> `Ok x with err -> return (`Error err)
+
+let die fmt =
+  Fmt.kstrf (fun msg -> Fmt.pr "[ERROR] %s\n%!" msg; exit 1) fmt
+
+module Fd : sig
+  val of_int : int -> Unix.file_descr option
+  val to_int : Unix.file_descr -> int
+  val of_string : string -> Unix.file_descr option
+  val to_string : Unix.file_descr -> string
+end = struct
+  let of_int n =
+    let fd = Obj.magic n in
+    match Unix.read fd "" 0 0 with
+    | 0           -> Some fd
+    | _           -> None
+    | exception _ -> None
+  let to_int = Obj.magic
+  let of_string s =
+    try int_of_string s |> of_int with Invalid_argument _ -> None
+  let to_string i = to_int i |> string_of_int
+end
 
 module Fs = struct
 
@@ -10,7 +36,7 @@ module Fs = struct
     try (stat path |> ignore; true) with Unix_error (ENOENT, _, _) -> false
 
   let required path =
-    if not (exists path) then failwiths "File not found: %s" path
+    if not (exists path) then failwiths "File not found: " path
 end
 
 let with_open_file path flags perm k =
@@ -18,7 +44,13 @@ let with_open_file path flags perm k =
   openfile path flags perm >>= fun fd ->
     k fd >>= fun res -> close fd >|= fun () -> res
 
-module POBox = struct
+module POBox : sig
+  type ('a, 'b) t
+  val create : unit -> ('a, 'b) t
+  val waitfor : ('a, 'b) t -> 'a -> 'b Lwt.t
+  val continue : ('a, 'b) t -> 'a -> 'b -> unit
+  val is_waiting : ('a, 'b) t -> 'a -> bool
+end = struct
 
   type ('a, 'b) t = ('a, 'b Lwt.u) Hashtbl.t
 
@@ -35,64 +67,52 @@ end
 
 (** context **)
 
-let shim = Pctrl_prefix_gen.prefix ^ "/lib/stublibs/dllinstrumentation_stubs.so"
+let shim  = Pctrl_prefix_gen.prefix ^ "/lib/stublibs/dllinstrumentation_stubs.so"
+let signo = Signal_fd.sigrtmin
 
 type ctx = {
-  efd        : Unix.file_descr
-; sigin      : int
-; sigout     : int
-; post       : (int, int) POBox.t
-; timeout    : float
-; env        : (string * string) list
-; mutable id : int
-}
+    control    : (Unix.file_descr * Unix.file_descr)
+  ; pobox      : (int, (int * Lwt_unix.file_descr)) POBox.t
+  ; timeout    : float
+  ; env        : (string * string) list
+  ; mutable id : int
+  }
 
-module Siginfo_t = Signal_fd.Siginfo_t
+let bufsize = 1024
 
-let rec receive fd buf p =
-  Lwt_unix.read fd buf 0 (Bytes.length buf) >>= fun _ ->
-    let (pid, cookie) = Siginfo_t.(get_pid buf, get_int buf) in
-    if POBox.is_waiting p cookie then
-      POBox.continue p cookie pid
-    else Fmt.pr "* Ack %d was not expected. Something's racy...\n%!" cookie ;
-    receive fd buf p
+let rec receive p fd buf =
+  let recv () =
+    Sendmsg_lwt.recv fd buf 0 bufsize >|= fun (n, x) ->
+      (Bytes.(sub buf 0 n |> unsafe_to_string), x) in
+  recv () >>= function
+    | (msg, None)   -> die "Control channel: no socket: %S" msg
+    | (msg, Some x) ->
+        match Scanf.sscanf msg "%d %d\n" (fun a b -> (a, b)) with
+        | (cookie, pid) -> POBox.continue p cookie (pid, x); receive p fd buf
+        | exception Scanf.Scan_failure err ->
+            die "Control channel: rubbish data: %s" msg
 
-let create ?(timeout=5.)
-           ?(env=[])
-           ?(sigout=Signal_fd.sigrtmin)
-           ?(sigin=Signal_fd.sigrtmin + 1) () =
+let create ?(timeout=5.) ?(env=[]) () =
   Fs.required shim;
-  Signal_fd.sigprocmask `Block [sigin] |> ignore ;
-  let efd  = Signal_fd.signalfd ~cloexec:true [sigin]
-  and post = POBox.create () in
+  let (c1, c2) = Unix.(socketpair PF_UNIX SOCK_STREAM 0) in
+  let pobox = POBox.create () in
+  let env   = (env_ctrl, Fd.to_string c2) :: env in
   async (fun () ->
-    receive (Lwt_unix.of_unix_file_descr efd)
-            (Bytes.create Siginfo_t.size) post) ;
-  { efd; sigin; sigout; post; timeout; env; id = 1 }
+    receive pobox (Lwt_unix.of_unix_file_descr c1) (Bytes.create bufsize)
+  );
+  Unix.set_close_on_exec c1;
+  { control = (c1, c2); pobox; timeout; env; id = 1 }
 
 let destroy ctx =
-  Signal_fd.sigprocmask `Unblock [ctx.sigin] |> ignore ;
-  Unix.close ctx.efd
-
+  let (c1, c2) = ctx.control in
+  Unix.(close c1; close c2)
 
 (** process **)
 
-type p = { pid : int ; ctx : ctx ; mutex : Lwt_mutex.t }
-
-type stat = string * char
-
-exception Dead of int * string * string
-
-let serially p = Lwt_mutex.with_lock p.mutex
-
-let pid { pid } = pid
-
-let of_pid ~ctx pid = { pid ; ctx ; mutex = Lwt_mutex.create () }
-
-let p_stat pid =
+let stat pid =
   let parse s =
     Scanf.sscanf s "%d %s %c" (fun _ comm state -> (comm, state))
-  and fp  = strf "/proc/%d/stat" pid
+  and fp  = Fmt.strf "/proc/%d/stat" pid
   and buf = Bytes.create 256 in
   let open Lwt_unix in try%lwt
     with_open_file fp [O_RDONLY] 0 @@ fun fd ->
@@ -102,26 +122,51 @@ let p_stat pid =
 let pp_stat =
   Fmt.(option ~none:(const string "<GONE>") (Dump.pair string char))
 
-let itsdead { pid } fmt =
-  let k msg = p_stat pid >>= fun s ->
-    fail (Dead (pid, msg, Fmt.strf "%a" pp_stat s)) in
-  Fmt.kstrf k fmt
+type p = { pid : int ; ctx : ctx ; fd : Lwt_unix.file_descr ; mx : Lwt_mutex.t }
 
-let environment ?(extra=[]) instrument =
-  let a1 =
-    if instrument then [| strf "LD_PRELOAD=%s" shim |] else [| |]
-  and a2 =
-    extra |> List.map (fun (k, v) -> strf "%s=%s" k v)
-          |> Array.of_list in
-  Array.(append (append a1 a2) (Unix.environment ()))
+let create_p ~ctx ~pid ~fd = { ctx; pid; fd; mx = Lwt_mutex.create () }
+
+let pid { pid; _ } = pid
+
+let fd { fd; _ } = fd
+
+let serially t f = Lwt_mutex.with_lock t.mx f
+
+type stat = string * char
+
+exception Dead of int * string * string
+
+let itsdead { pid; fd; _ } fmt =
+  let k msg =
+    let t1 = stat pid
+    and t2 = Lwt_unix.close fd in
+    t1 >>= fun s -> t2 >>= fun () ->
+      fail (Dead (pid, msg, Fmt.strf "%a" pp_stat s)) in
+   Fmt.kstrf k fmt
+
+let environment instrument env =
+  let (++) = Array.append in
+  (if instrument then [| Fmt.strf "LD_PRELOAD=%s" shim |] else [| |])
+  ++
+  (env |> List.map (fun (k, v) -> Fmt.strf "%s=%s" k v) |> Array.of_list)
+  ++
+  Unix.environment ()
 
 let start ?(instrument=true) ctx exe args =
+  let rec waitfor pid =
+    result (stat pid) >>= function
+      | `Ok (Some (_, 'S')) -> return_unit
+      | _ -> Lwt_unix.sleep 0.005 >>= fun () -> waitfor pid in
   Fs.required exe;
-  let env  = environment ~extra:ctx.env instrument
+  let (s1, s2) = Unix.(socketpair PF_UNIX SOCK_STREAM 0) in
+  let env  = environment instrument ((env_data, Fd.to_string s2)::ctx.env)
   and args = Array.of_list (exe::args) in
   let open Unix in match fork () with
-  | 0   -> Unix.execve exe args env
-  | pid -> Lwt_unix.sleep 0.1 >|= fun () -> of_pid ~ctx pid
+  | 0   -> Unix.(close s1; execve exe args env)
+  | pid ->
+      Unix.close s2;
+      let fd = Lwt_unix.of_unix_file_descr s1 in
+      waitfor pid >|= fun () -> create_p ~ctx ~fd ~pid
   | exception Unix_error (EAGAIN, _, _) ->
       failwiths "Pctrl.start: failed to fork: EAGAIN"
 
@@ -131,20 +176,18 @@ let timeout ~time f =
   (f >|= (fun x -> `Ok x)) <?> (Lwt_unix.sleep time >|= fun () -> `Timeout)
 
 let clone ({ pid; ctx } as p) =
-  serially p @@ fun () ->
-    let cookie = new_cookie ctx in
-    let th = POBox.waitfor ctx.post cookie >|= of_pid ~ctx in
-    let rec wkup = function
-      | 0 -> itsdead p "Clone timeout (cookie %d)" cookie
-      | n ->
-          Unix.kill p.pid Sys.sigcont;
-          timeout ~time:0.01 th >>= function
-            | `Ok x    -> return x
-            | `Timeout -> wkup (pred n) in
-    try%lwt
-      Signal_fd.sigqueue ~pid ~sgn:ctx.sigout ~value:cookie;
-      wkup (int_of_float (ctx.timeout /. 0.01))
-    with Unix.Unix_error (Unix.ESRCH, _, _) -> itsdead p "Clone ESRCH"
+  let cookie = new_cookie ctx in
+  let t1 =
+    try
+      Signal_fd.sigqueue ~pid ~sgn:signo ~value:cookie |> return
+    with Unix.Unix_error (Unix.ESRCH, _, _) -> itsdead p "Clone ESRCH" in
+  t1 >>= fun () ->
+    timeout ~time:ctx.timeout
+      (POBox.waitfor ctx.pobox cookie >|= fun (pid, fd) ->
+        create_p ~ctx ~pid ~fd)
+  >>= function
+  | `Timeout -> itsdead p "Clone timeout (cookie: %d)" cookie
+  | `Ok p    -> return p
 
 let terminate p =
   let send () =
@@ -152,9 +195,9 @@ let terminate p =
       kill p.pid Sys.sigterm;
       kill p.pid Sys.sigcont
     with Unix_error (ESRCH, _, _) -> () in
-  serially p @@ fun () -> send () |> return
+  serially p @@ fun () -> Lwt_unix.close (fd p) >|= send
 
-let signal ({ pid; ctx } as p) sign cond =
+let signal ({ pid; ctx } as p) ~sign cond =
   let kill () = Unix.(
     try kill pid sign |> return with
       Unix_error (ESRCH, _, _) -> itsdead p "Trying to send signal."
@@ -162,7 +205,7 @@ let signal ({ pid; ctx } as p) sign cond =
   let rec go = function
     | 0 -> itsdead p "Waiting for signal to cause state transition"
     | n ->
-        kill () >>= fun () -> p_stat pid >>= function
+        kill () >>= fun () -> stat pid >>= function
           | None -> itsdead p "Trying to send signal."
           | Some (_, s) when cond s -> return_unit
           | Some _ -> Lwt_unix.sleep 0.01 >>= fun () -> go (pred n) in
