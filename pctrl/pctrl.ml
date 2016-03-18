@@ -10,7 +10,7 @@ module Fs = struct
     try (stat path |> ignore; true) with Unix_error (ENOENT, _, _) -> false
 
   let required path =
-    if not (exists path) then failwiths "File not found: " path
+    if not (exists path) then failwiths "File not found: %s" path
 end
 
 let with_open_file path flags perm k =
@@ -35,9 +35,7 @@ end
 
 (** context **)
 
-let shim =
-  Pctrl_prefix_gen.prefix
-    ^ "/lib/stublibs/dllinstrumentation_stubs.so"
+let shim = Pctrl_prefix_gen.prefix ^ "/lib/stublibs/dllinstrumentation_stubs.so"
 
 type ctx = {
   efd        : Unix.file_descr
@@ -79,13 +77,13 @@ let destroy ctx =
 
 (** process **)
 
-type t = { pid : int ; ctx : ctx ; mutex : Lwt_mutex.t }
+type p = { pid : int ; ctx : ctx ; mutex : Lwt_mutex.t }
 
 type stat = string * char
 
 exception Dead of int * string * string
 
-let serially t = Lwt_mutex.with_lock t.mutex
+let serially p = Lwt_mutex.with_lock p.mutex
 
 let pid { pid } = pid
 
@@ -132,43 +130,43 @@ let new_cookie ({ id } as ctx) = ctx.id <- id + 1; id
 let timeout ~time f =
   (f >|= (fun x -> `Ok x)) <?> (Lwt_unix.sleep time >|= fun () -> `Timeout)
 
-let clone ({ pid; ctx } as t) =
-  serially t @@ fun () ->
+let clone ({ pid; ctx } as p) =
+  serially p @@ fun () ->
     let cookie = new_cookie ctx in
     let th = POBox.waitfor ctx.post cookie >|= of_pid ~ctx in
     let rec wkup = function
-      | 0 -> itsdead t "Clone timeout (cookie %d)" cookie
+      | 0 -> itsdead p "Clone timeout (cookie %d)" cookie
       | n ->
-          Unix.kill t.pid Sys.sigcont;
+          Unix.kill p.pid Sys.sigcont;
           timeout ~time:0.01 th >>= function
             | `Ok x    -> return x
             | `Timeout -> wkup (pred n) in
     try%lwt
       Signal_fd.sigqueue ~pid ~sgn:ctx.sigout ~value:cookie;
       wkup (int_of_float (ctx.timeout /. 0.01))
-    with Unix.Unix_error (Unix.ESRCH, _, _) -> itsdead t "Clone ESRCH"
+    with Unix.Unix_error (Unix.ESRCH, _, _) -> itsdead p "Clone ESRCH"
 
-let terminate t =
+let terminate p =
   let send () =
     let open Unix in try
-      kill t.pid Sys.sigterm;
-      kill t.pid Sys.sigcont
+      kill p.pid Sys.sigterm;
+      kill p.pid Sys.sigcont
     with Unix_error (ESRCH, _, _) -> () in
-  serially t @@ fun () -> send () |> return
+  serially p @@ fun () -> send () |> return
 
-let signal ({ pid; ctx } as t) sign p =
+let signal ({ pid; ctx } as p) sign cond =
   let kill () = Unix.(
     try kill pid sign |> return with
-      Unix_error (ESRCH, _, _) -> itsdead t "Trying to send signal."
+      Unix_error (ESRCH, _, _) -> itsdead p "Trying to send signal."
   ) in
   let rec go = function
-    | 0 -> itsdead t "Waiting for signal to cause state transition"
+    | 0 -> itsdead p "Waiting for signal to cause state transition"
     | n ->
         kill () >>= fun () -> p_stat pid >>= function
-          | None -> itsdead t "Trying to send signal."
-          | Some (_, s) when p s -> return_unit
+          | None -> itsdead p "Trying to send signal."
+          | Some (_, s) when cond s -> return_unit
           | Some _ -> Lwt_unix.sleep 0.01 >>= fun () -> go (pred n) in
-  serially t @@ fun () -> go (int_of_float (ctx.timeout /. 0.01))
+  serially p @@ fun () -> go (int_of_float (ctx.timeout /. 0.01))
 
-let freeze t = signal t Sys.sigstop (fun s -> s = 'T')
-let unfreeze t = signal t Sys.sigcont (fun s -> s <> 'T')
+let freeze p = signal p Sys.sigstop (fun s -> s = 'T')
+let unfreeze p = signal p Sys.sigcont (fun s -> s <> 'T')
