@@ -36,7 +36,7 @@ module Fs = struct
     try (stat path |> ignore; true) with Unix_error (ENOENT, _, _) -> false
 
   let required path =
-    if not (exists path) then failwiths "File not found: " path
+    if not (exists path) then failwiths "File not found: %s" path
 end
 
 let with_open_file path flags perm k =
@@ -107,7 +107,18 @@ let destroy ctx =
   let (c1, c2) = ctx.control in
   Unix.(close c1; close c2)
 
-(** process **)
+let retry ?(precision=0.01) ctx ~f ~errk =
+  let rec go = function
+    | 0 -> errk ()
+    | n ->
+        Lwt_unix.sleep precision >>= fun () -> f () >>= function
+          | Some res -> return res | None -> go (pred n) in
+  let steps = int_of_float (ctx.timeout /. precision) in
+  go steps
+
+(** stat **)
+
+type stat = string * char
 
 let stat pid =
   let parse s =
@@ -122,27 +133,44 @@ let stat pid =
 let pp_stat =
   Fmt.(option ~none:(const string "<GONE>") (Dump.pair string char))
 
+exception Dead of int * string * string
+
+let itsdead_pid ?(hook=fun () -> return_unit) pid fmt =
+  let k msg =
+    let t1 = stat pid
+    and t2 = hook () in
+    t1 >>= fun s -> t2 >>= fun () ->
+      fail (Dead (pid, msg, Fmt.strf "%a" pp_stat s)) in
+   Fmt.kstrf k fmt
+
+let wait_stat ?precision ~ctx pid f =
+  retry ?precision ctx
+    ~f:(fun () -> stat pid >>= f)
+    ~errk:(fun () -> itsdead_pid pid "Waiting for state transition")
+
+let sleeping_pid ?precision ~ctx pid =
+  wait_stat ?precision ~ctx pid @@ function
+    | Some (_, 'S') -> return_some ()
+    | None          -> itsdead_pid pid "Waiting for sleep"
+    | _             -> return_none
+
+
+(** process **)
+
 type p = { pid : int ; ctx : ctx ; fd : Lwt_unix.file_descr ; mx : Lwt_mutex.t }
 
 let create_p ~ctx ~pid ~fd = { ctx; pid; fd; mx = Lwt_mutex.create () }
+
+let itsdead { pid; fd } fmt =
+  itsdead_pid ~hook:(fun () -> Lwt_unix.close fd) pid fmt
+
+let wait_sleeping ?precision p = sleeping_pid ?precision ~ctx:p.ctx p.pid
 
 let pid { pid; _ } = pid
 
 let fd { fd; _ } = fd
 
 let serially t f = Lwt_mutex.with_lock t.mx f
-
-type stat = string * char
-
-exception Dead of int * string * string
-
-let itsdead { pid; fd; _ } fmt =
-  let k msg =
-    let t1 = stat pid
-    and t2 = Lwt_unix.close fd in
-    t1 >>= fun s -> t2 >>= fun () ->
-      fail (Dead (pid, msg, Fmt.strf "%a" pp_stat s)) in
-   Fmt.kstrf k fmt
 
 let environment instrument env =
   let (++) = Array.append in
@@ -153,10 +181,6 @@ let environment instrument env =
   Unix.environment ()
 
 let start ?(instrument=true) ctx exe args =
-  let rec waitfor pid =
-    result (stat pid) >>= function
-      | `Ok (Some (_, 'S')) -> return_unit
-      | _ -> Lwt_unix.sleep 0.005 >>= fun () -> waitfor pid in
   Fs.required exe;
   let (s1, s2) = Unix.(socketpair PF_UNIX SOCK_STREAM 0) in
   let env  = environment instrument ((env_data, Fd.to_string s2)::ctx.env)
@@ -165,8 +189,8 @@ let start ?(instrument=true) ctx exe args =
   | 0   -> Unix.(close s1; execve exe args env)
   | pid ->
       Unix.close s2;
-      let fd = Lwt_unix.of_unix_file_descr s1 in
-      waitfor pid >|= fun () -> create_p ~ctx ~fd ~pid
+      sleeping_pid ~ctx pid >|= fun () ->
+        create_p ~ctx ~fd:(Lwt_unix.of_unix_file_descr s1) ~pid
   | exception Unix_error (EAGAIN, _, _) ->
       failwiths "Pctrl.start: failed to fork: EAGAIN"
 
@@ -183,8 +207,7 @@ let clone ({ pid; ctx } as p) =
     with Unix.Unix_error (Unix.ESRCH, _, _) -> itsdead p "Clone ESRCH" in
   t1 >>= fun () ->
     timeout ~time:ctx.timeout
-      (POBox.waitfor ctx.pobox cookie >|= fun (pid, fd) ->
-        create_p ~ctx ~pid ~fd)
+      (POBox.waitfor ctx.pobox cookie >|= fun (pid, fd) -> create_p ~ctx ~pid ~fd)
   >>= function
   | `Timeout -> itsdead p "Clone timeout (cookie: %d)" cookie
   | `Ok p    -> return p
@@ -213,3 +236,8 @@ let signal ({ pid; ctx } as p) ~sign cond =
 
 let freeze p = signal p Sys.sigstop (fun s -> s = 'T')
 let unfreeze p = signal p Sys.sigcont (fun s -> s <> 'T')
+
+let wait_dead ?precision { ctx; pid } =
+  wait_stat ?precision ~ctx pid @@ function
+    | None | Some (_, 'Z') -> return_some ()
+    | _ -> return_none

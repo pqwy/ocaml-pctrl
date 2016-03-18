@@ -1,3 +1,5 @@
+val env_data : string
+
 type ctx
 
 val create : ?timeout:float -> ?env:(string * string) list -> unit -> ctx
@@ -19,3 +21,6 @@ val fd        : p -> Lwt_unix.file_descr
 
 val serially  : p -> (unit -> 'a Lwt.t) -> 'a Lwt.t
 val signal    : p -> sign:int -> (char -> bool) -> unit Lwt.t
+
+val wait_sleeping : ?precision:float -> p -> unit Lwt.t
+val wait_dead     : ?precision:float -> p -> unit Lwt.t

@@ -26,16 +26,16 @@ Library instrumentation
   CCOpt:         -O3
 
 
-# Executable demo1slave
-#   Path:           demo1
-#   Install:        false
-#   CompiledObject: best
-#   MainIs:         demo1slave.ml
-#   BuildDepends:   fmt,lwt.unix 
+Executable demo1slave
+  Path:           demo1
+  Install:        false
+  CompiledObject: best
+  MainIs:         demo1slave.ml
+  BuildDepends:   fmt,lwt.unix
 
-# Executable demo1master
-#   Path:           demo1
-#   Install:        false
-#   CompiledObject: best
-#   MainIs:         demo1master.ml
-#   BuildDepends:   pctrl,fmt,lwt.unix 
+Executable demo1master
+  Path:           demo1
+  Install:        false
+  CompiledObject: best
+  MainIs:         demo1master.ml
+  BuildDepends:   pctrl,fmt,lwt.unix

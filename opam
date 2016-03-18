@@ -15,6 +15,8 @@ remove:  [ "ocamlfind" "remove" "pctrl" ]
 
 depends: [
   "ocamlfind" {build}
+  "oasis" {build}
+  "sendmsg"
   "signalfd" 
   "fmt"
   "lwt"
