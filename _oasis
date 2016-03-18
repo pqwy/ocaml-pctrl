@@ -4,16 +4,14 @@ Version:       0.0.1
 Synopsis:      PCTRL.
 Authors:       XXX
 License:       BSD-2-clause
-Plugins:       META (0.4), DevFiles (0.4)
+Plugins:       META (0.4)
 BuildTools:    ocamlbuild
 OCamlVersion:  >= 4.02.0
 PostConfCommand: ./postconf
 
-
 Flag demo1
   Description: demo1
   Default:     false
-
 
 Library pctrl
   Path:            pctrl
